@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""Thin herdr agent wrapper. Prompt text is one execve argv, never a shell string."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+
+HERDR = os.environ.get("HERDR", "herdr")
+BUSY = ("agent_pane_busy", "agent_not_ready")
+
+USAGE = """\
+Usage:
+  agents-cli list
+  agents-cli read <target> [--lines N] [--source SOURCE]
+  agents-cli send <target> [--file PATH] [--wait] [--timeout MS] [--until STATUS] [text...]
+  agents-cli wait <target> [--until STATUS] [--timeout MS]
+  agents-cli start <name> --kind KIND --pane ID [--retries N] [--retry-delay MS] [--timeout MS] [-- AGENT_ARG...]
+  agents-cli ask <target> [--file PATH] [--timeout MS] [--until STATUS] [text...]
+
+Prompt text comes from --file, remaining args, or stdin. It is passed to
+herdr as a single argv element, so leading # and -- are safe.
+"""
+
+
+class HerdrError(Exception):
+    def __init__(self, message, code="HERDR", payload=None):
+        super().__init__(message)
+        self.code = code
+        self.payload = payload
+
+
+def emit_ok(data):
+    sys.stdout.write(json.dumps({"ok": True, "data": data}, separators=(",", ":")) + "\n")
+    return 0
+
+
+def emit_err(message, code="ERROR"):
+    sys.stdout.write(json.dumps({"ok": False, "error": message, "code": code}, separators=(",", ":")) + "\n")
+    return 1
+
+
+def take_flag(args, name, takes_value=False):
+    if name not in args:
+        return args, None
+    i = args.index(name)
+    if not takes_value:
+        return args[:i] + args[i + 1 :], True
+    if i + 1 >= len(args):
+        raise HerdrError(f"{name} needs a value", "USAGE")
+    return args[:i] + args[i + 2 :], args[i + 1]
+
+
+def herdr(argv, timeout=None):
+    try:
+        completed = subprocess.run(
+            [HERDR, *argv],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError as error:
+        raise HerdrError(f"herdr not found: {error}", "HERDR_MISSING") from error
+    except subprocess.TimeoutExpired as error:
+        raise HerdrError(f"herdr timed out: {' '.join(argv)}", "TIMEOUT") from error
+    err = (completed.stderr or "").strip()
+    out = (completed.stdout or "").strip()
+    if completed.returncode != 0:
+        blob = err or out or f"herdr exited {completed.returncode}"
+        code = "BUSY" if any(token in blob for token in BUSY) else "HERDR"
+        raise HerdrError(blob, code)
+    if not out:
+        return {}
+    try:
+        payload = json.loads(out)
+    except json.JSONDecodeError:
+        return {"raw": out}
+    if isinstance(payload, dict) and "result" in payload:
+        return payload["result"]
+    return payload
+
+
+def prompt_argv(target, text, wait=False, timeout=None, until=None):
+    argv = ["agent", "prompt", target, text]
+    if wait:
+        argv.append("--wait")
+    if until:
+        for status in until if isinstance(until, list) else [until]:
+            argv.extend(["--until", status])
+    if timeout:
+        argv.extend(["--timeout", str(timeout)])
+    return argv
+
+
+def read_prompt(args):
+    args, path = take_flag(args, "--file", True)
+    if path:
+        with open(path, encoding="utf-8") as handle:
+            return args, handle.read()
+    if args:
+        return [], " ".join(args)
+    if sys.stdin.isatty():
+        raise HerdrError("prompt text required via --file, args, or stdin", "USAGE")
+    return [], sys.stdin.read()
+
+
+def cmd_list(_args):
+    return emit_ok(herdr(["agent", "list"]))
+
+
+def cmd_read(args):
+    args, lines = take_flag(args, "--lines", True)
+    args, source = take_flag(args, "--source", True)
+    if not args:
+        raise HerdrError("read needs a target", "USAGE")
+    target, args = args[0], args[1:]
+    argv = ["agent", "read", target]
+    if source:
+        argv.extend(["--source", source])
+    if lines:
+        argv.extend(["--lines", lines])
+    return emit_ok(herdr(argv))
+
+
+def cmd_send(args, wait_default=False):
+    args, wait = take_flag(args, "--wait")
+    args, timeout = take_flag(args, "--timeout", True)
+    until = []
+    while "--until" in args:
+        args, status = take_flag(args, "--until", True)
+        until.append(status)
+    if not args:
+        raise HerdrError("send needs a target", "USAGE")
+    target, args = args[0], args[1:]
+    args, text = read_prompt(args)
+    if not text:
+        raise HerdrError("prompt text is empty", "USAGE")
+    payload = herdr(prompt_argv(target, text, wait=wait or wait_default, timeout=timeout, until=until or None))
+    return emit_ok(payload)
+
+
+def cmd_wait(args):
+    args, timeout = take_flag(args, "--timeout", True)
+    until = []
+    while "--until" in args:
+        args, status = take_flag(args, "--until", True)
+        until.append(status)
+    if not args:
+        raise HerdrError("wait needs a target", "USAGE")
+    target = args[0]
+    argv = ["agent", "wait", target]
+    for status in until:
+        argv.extend(["--until", status])
+    if timeout:
+        argv.extend(["--timeout", timeout])
+    return emit_ok(herdr(argv))
+
+
+def cmd_start(args):
+    retries = 10
+    delay_ms = 500
+    args, kind = take_flag(args, "--kind", True)
+    args, pane = take_flag(args, "--pane", True)
+    args, timeout = take_flag(args, "--timeout", True)
+    args, retries_s = take_flag(args, "--retries", True)
+    args, delay_s = take_flag(args, "--retry-delay", True)
+    extra = []
+    if "--" in args:
+        i = args.index("--")
+        extra = args[i + 1 :]
+        args = args[:i]
+    if not args:
+        raise HerdrError("start needs a name", "USAGE")
+    if not kind or not pane:
+        raise HerdrError("start needs --kind and --pane", "USAGE")
+    name = args[0]
+    if retries_s:
+        retries = int(retries_s)
+    if delay_s:
+        delay_ms = int(delay_s)
+    argv = ["agent", "start", name, "--kind", kind, "--pane", pane]
+    if timeout:
+        argv.extend(["--timeout", timeout])
+    if extra:
+        argv.append("--")
+        argv.extend(extra)
+    last = None
+    for attempt in range(retries):
+        try:
+            return emit_ok(herdr(argv))
+        except HerdrError as error:
+            last = error
+            if error.code != "BUSY" or attempt == retries - 1:
+                raise
+            time.sleep(delay_ms / 1000)
+    raise last
+
+
+def cmd_ask(args):
+    args, timeout = take_flag(args, "--timeout", True)
+    until = []
+    while "--until" in args:
+        args, status = take_flag(args, "--until", True)
+        until.append(status)
+    if not args:
+        raise HerdrError("ask needs a target", "USAGE")
+    target, args = args[0], args[1:]
+    args, text = read_prompt(args)
+    if not text:
+        raise HerdrError("prompt text is empty", "USAGE")
+    statuses = until or ["idle", "done", "blocked"]
+    send_payload = herdr(prompt_argv(target, text, wait=True, timeout=timeout, until=statuses))
+    read_payload = herdr(["agent", "read", target, "--source", "recent-unwrapped"])
+    return emit_ok({"status": send_payload, "reply": read_payload})
+
+
+COMMANDS = {
+    "list": cmd_list,
+    "read": cmd_read,
+    "send": cmd_send,
+    "wait": cmd_wait,
+    "start": cmd_start,
+    "ask": cmd_ask,
+}
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        sys.stdout.write(USAGE)
+        return 0
+    command = argv[0]
+    handler = COMMANDS.get(command)
+    if handler is None:
+        return emit_err(f"unknown command: {command}", "USAGE")
+    try:
+        return handler(argv[1:])
+    except HerdrError as error:
+        return emit_err(str(error), error.code)
+    except OSError as error:
+        return emit_err(str(error), "IO")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
