@@ -1,36 +1,40 @@
 #!/usr/bin/env python3
-"""Thin herdr agent wrapper. Prompt text is one execve argv, never a shell string."""
+"""Talk to herdr in workspaces and tabs. Panes stay internal."""
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 
 HERDR = os.environ.get("HERDR", "herdr")
 BUSY = ("agent_pane_busy", "agent_not_ready")
+TAB_ID = re.compile(r"^w[0-9]+:t\S+$")
 
 USAGE = """\
 Usage:
-  agents-cli list
-  agents-cli read <target> [--lines N] [--source SOURCE]
-  agents-cli send <target> [--file PATH] [--wait] [--timeout MS] [--until STATUS] [text...]
-  agents-cli wait <target> [--until STATUS] [--timeout MS]
-  agents-cli start <name> --kind KIND --pane ID [--retries N] [--retry-delay MS] [--timeout MS] [-- AGENT_ARG...]
-  agents-cli ask <target> [--file PATH] [--timeout MS] [--until STATUS] [text...]
+  agents-cli workspaces
+  agents-cli tabs [--workspace ID|label]
+  agents-cli spawn <name> --workspace ID|label [--kind KIND] [--cwd PATH] [--label TEXT]
+  agents-cli start <name> --tab TAB_ID [--kind KIND]
+  agents-cli send <tab|name> [--file PATH] [--wait] [--timeout MS] [--until STATUS] [text...]
+  agents-cli read <tab|name> [--lines N] [--source SOURCE]
+  agents-cli wait <tab|name> [--until STATUS] [--timeout MS]
+  agents-cli ask <tab|name> [--file PATH] [--timeout MS] [--until STATUS] [text...]
 
-Prompt text comes from --file, remaining args, or stdin. It is passed to
-herdr as a single argv element, so leading # and -- are safe.
+The unit is a tab in a workspace. Prompt text comes from --file, args, or stdin
+and is passed to herdr as one argv element, so leading # and -- are safe.
+Default --kind is pi. spawn always uses --no-focus.
 """
 
 
 class HerdrError(Exception):
-    def __init__(self, message, code="HERDR", payload=None):
+    def __init__(self, message, code="HERDR"):
         super().__init__(message)
         self.code = code
-        self.payload = payload
 
 
 def emit_ok(data):
@@ -72,6 +76,17 @@ def herdr(argv, timeout=None):
     if completed.returncode != 0:
         blob = err or out or f"herdr exited {completed.returncode}"
         code = "BUSY" if any(token in blob for token in BUSY) else "HERDR"
+        for text in (err, out):
+            if not text:
+                continue
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            error = parsed.get("error") or {}
+            if error.get("code") in BUSY:
+                code = "BUSY"
+            blob = error.get("message") or blob
         raise HerdrError(blob, code)
     if not out:
         return {}
@@ -96,6 +111,39 @@ def prompt_argv(target, text, wait=False, timeout=None, until=None):
     return argv
 
 
+def tab_create_argv(workspace_id, cwd=None, label=None):
+    argv = ["tab", "create", "--workspace", workspace_id, "--no-focus"]
+    if cwd:
+        argv.extend(["--cwd", cwd])
+    if label:
+        argv.extend(["--label", label])
+    return argv
+
+
+def pane_from_list(panes, tab_id):
+    hits = [pane for pane in panes if pane.get("tab_id") == tab_id]
+    if not hits:
+        raise HerdrError(f"no terminal in tab {tab_id}", "NOT_FOUND")
+    if len(hits) > 1:
+        named = [pane for pane in hits if pane.get("agent") or pane.get("name")]
+        hits = named or hits
+    return hits[0]
+
+
+def public_tab(tab, pane=None, agent=None):
+    pane = pane or {}
+    agent = agent or {}
+    return {
+        "workspace_id": tab.get("workspace_id") or pane.get("workspace_id"),
+        "tab_id": tab.get("tab_id") or pane.get("tab_id"),
+        "label": tab.get("label"),
+        "cwd": pane.get("cwd") or agent.get("cwd"),
+        "kind": agent.get("agent") or pane.get("agent"),
+        "name": agent.get("name"),
+        "status": tab.get("agent_status") or agent.get("agent_status") or pane.get("agent_status"),
+    }
+
+
 def read_prompt(args):
     args, path = take_flag(args, "--file", True)
     if path:
@@ -108,25 +156,147 @@ def read_prompt(args):
     return [], sys.stdin.read()
 
 
-def cmd_list(_args):
-    return emit_ok(herdr(["agent", "list"]))
+def workspaces():
+    return herdr(["workspace", "list"]).get("workspaces") or []
 
 
-def cmd_read(args):
-    args, lines = take_flag(args, "--lines", True)
-    args, source = take_flag(args, "--source", True)
+def resolve_workspace(token):
+    for workspace in workspaces():
+        if token in (workspace.get("workspace_id"), workspace.get("label")):
+            return workspace
+    raise HerdrError(f"workspace not found: {token}", "NOT_FOUND")
+
+
+def panes_in_workspace(workspace_id=None):
+    argv = ["pane", "list"]
+    if workspace_id:
+        argv.extend(["--workspace", workspace_id])
+    return herdr(argv).get("panes") or []
+
+
+def pane_for_tab(tab_id):
+    workspace_id = tab_id.split(":", 1)[0] if ":" in tab_id else None
+    return pane_from_list(panes_in_workspace(workspace_id), tab_id)
+
+
+def agents():
+    return herdr(["agent", "list"]).get("agents") or []
+
+
+def resolve_target(target):
+    for agent in agents():
+        if target in (agent.get("name"), agent.get("tab_id")):
+            return agent.get("name") or agent["pane_id"]
+    if TAB_ID.match(target):
+        return pane_for_tab(target)["pane_id"]
+    return target
+
+
+def start_on_pane(name, kind, pane_id, retries=10, delay_ms=500, timeout=None, extra=None):
+    argv = ["agent", "start", name, "--kind", kind, "--pane", pane_id]
+    if timeout:
+        argv.extend(["--timeout", str(timeout)])
+    if extra:
+        argv.append("--")
+        argv.extend(extra)
+    last = None
+    for attempt in range(retries):
+        try:
+            return herdr(argv)
+        except HerdrError as error:
+            last = error
+            if error.code != "BUSY" or attempt == retries - 1:
+                raise
+            time.sleep(delay_ms / 1000)
+    raise last
+
+
+def cmd_workspaces(_args):
+    rows = [
+        {
+            "workspace_id": workspace.get("workspace_id"),
+            "label": workspace.get("label"),
+            "tab_count": workspace.get("tab_count"),
+        }
+        for workspace in workspaces()
+    ]
+    return emit_ok({"workspaces": rows})
+
+
+def cmd_tabs(args):
+    args, token = take_flag(args, "--workspace", True)
+    workspace_id = resolve_workspace(token)["workspace_id"] if token else None
+    tab_argv = ["tab", "list"]
+    if workspace_id:
+        tab_argv.extend(["--workspace", workspace_id])
+    tabs = herdr(tab_argv).get("tabs") or []
+    pane_map = {}
+    for pane in panes_in_workspace(workspace_id):
+        pane_map.setdefault(pane.get("tab_id"), pane)
+    agent_map = {agent.get("tab_id"): agent for agent in agents()}
+    rows = [
+        public_tab(tab, pane_map.get(tab.get("tab_id")), agent_map.get(tab.get("tab_id")))
+        for tab in tabs
+    ]
+    return emit_ok({"tabs": rows})
+
+
+def cmd_spawn(args):
+    args, workspace = take_flag(args, "--workspace", True)
+    args, kind = take_flag(args, "--kind", True)
+    args, cwd = take_flag(args, "--cwd", True)
+    args, label = take_flag(args, "--label", True)
+    extra = []
+    if "--" in args:
+        i = args.index("--")
+        extra = args[i + 1 :]
+        args = args[:i]
     if not args:
-        raise HerdrError("read needs a target", "USAGE")
-    target, args = args[0], args[1:]
-    argv = ["agent", "read", target]
-    if source:
-        argv.extend(["--source", source])
-    if lines:
-        argv.extend(["--lines", lines])
-    return emit_ok(herdr(argv))
+        raise HerdrError("spawn needs a name", "USAGE")
+    if not workspace:
+        raise HerdrError("spawn needs --workspace", "USAGE")
+    name = args[0]
+    kind = kind or "pi"
+    workspace_id = resolve_workspace(workspace)["workspace_id"]
+    created = herdr(tab_create_argv(workspace_id, cwd=cwd, label=label or name))
+    tab = created.get("tab") or {}
+    root = created.get("root_pane") or {}
+    pane_id = root.get("pane_id")
+    tab_id = tab.get("tab_id")
+    if not pane_id:
+        if not tab_id:
+            raise HerdrError("tab create did not return a tab", "HERDR")
+        pane_id = pane_for_tab(tab_id)["pane_id"]
+    start_on_pane(name, kind, pane_id, extra=extra)
+    return emit_ok({
+        "workspace_id": workspace_id,
+        "tab_id": tab_id,
+        "label": tab.get("label") or label or name,
+        "name": name,
+        "kind": kind,
+        "cwd": cwd,
+    })
 
 
-def cmd_send(args, wait_default=False):
+def cmd_start(args):
+    args, kind = take_flag(args, "--kind", True)
+    args, tab_id = take_flag(args, "--tab", True)
+    extra = []
+    if "--" in args:
+        i = args.index("--")
+        extra = args[i + 1 :]
+        args = args[:i]
+    if not args:
+        raise HerdrError("start needs a name", "USAGE")
+    if not tab_id:
+        raise HerdrError("start needs --tab", "USAGE")
+    name = args[0]
+    pane_id = pane_for_tab(tab_id)["pane_id"]
+    start_on_pane(name, kind or "pi", pane_id, extra=extra)
+    return emit_ok({"tab_id": tab_id, "name": name, "kind": kind or "pi"})
+
+
+def cmd_send(args):
     args, wait = take_flag(args, "--wait")
     args, timeout = take_flag(args, "--timeout", True)
     until = []
@@ -134,13 +304,28 @@ def cmd_send(args, wait_default=False):
         args, status = take_flag(args, "--until", True)
         until.append(status)
     if not args:
-        raise HerdrError("send needs a target", "USAGE")
+        raise HerdrError("send needs a tab or name", "USAGE")
     target, args = args[0], args[1:]
     args, text = read_prompt(args)
     if not text:
         raise HerdrError("prompt text is empty", "USAGE")
-    payload = herdr(prompt_argv(target, text, wait=wait or wait_default, timeout=timeout, until=until or None))
+    payload = herdr(
+        prompt_argv(resolve_target(target), text, wait=bool(wait), timeout=timeout, until=until or None)
+    )
     return emit_ok(payload)
+
+
+def cmd_read(args):
+    args, lines = take_flag(args, "--lines", True)
+    args, source = take_flag(args, "--source", True)
+    if not args:
+        raise HerdrError("read needs a tab or name", "USAGE")
+    argv = ["agent", "read", resolve_target(args[0])]
+    if source:
+        argv.extend(["--source", source])
+    if lines:
+        argv.extend(["--lines", lines])
+    return emit_ok(herdr(argv))
 
 
 def cmd_wait(args):
@@ -150,54 +335,13 @@ def cmd_wait(args):
         args, status = take_flag(args, "--until", True)
         until.append(status)
     if not args:
-        raise HerdrError("wait needs a target", "USAGE")
-    target = args[0]
-    argv = ["agent", "wait", target]
+        raise HerdrError("wait needs a tab or name", "USAGE")
+    argv = ["agent", "wait", resolve_target(args[0])]
     for status in until:
         argv.extend(["--until", status])
     if timeout:
         argv.extend(["--timeout", timeout])
     return emit_ok(herdr(argv))
-
-
-def cmd_start(args):
-    retries = 10
-    delay_ms = 500
-    args, kind = take_flag(args, "--kind", True)
-    args, pane = take_flag(args, "--pane", True)
-    args, timeout = take_flag(args, "--timeout", True)
-    args, retries_s = take_flag(args, "--retries", True)
-    args, delay_s = take_flag(args, "--retry-delay", True)
-    extra = []
-    if "--" in args:
-        i = args.index("--")
-        extra = args[i + 1 :]
-        args = args[:i]
-    if not args:
-        raise HerdrError("start needs a name", "USAGE")
-    if not kind or not pane:
-        raise HerdrError("start needs --kind and --pane", "USAGE")
-    name = args[0]
-    if retries_s:
-        retries = int(retries_s)
-    if delay_s:
-        delay_ms = int(delay_s)
-    argv = ["agent", "start", name, "--kind", kind, "--pane", pane]
-    if timeout:
-        argv.extend(["--timeout", timeout])
-    if extra:
-        argv.append("--")
-        argv.extend(extra)
-    last = None
-    for attempt in range(retries):
-        try:
-            return emit_ok(herdr(argv))
-        except HerdrError as error:
-            last = error
-            if error.code != "BUSY" or attempt == retries - 1:
-                raise
-            time.sleep(delay_ms / 1000)
-    raise last
 
 
 def cmd_ask(args):
@@ -207,23 +351,27 @@ def cmd_ask(args):
         args, status = take_flag(args, "--until", True)
         until.append(status)
     if not args:
-        raise HerdrError("ask needs a target", "USAGE")
+        raise HerdrError("ask needs a tab or name", "USAGE")
     target, args = args[0], args[1:]
     args, text = read_prompt(args)
     if not text:
         raise HerdrError("prompt text is empty", "USAGE")
+    resolved = resolve_target(target)
     statuses = until or ["idle", "done", "blocked"]
-    send_payload = herdr(prompt_argv(target, text, wait=True, timeout=timeout, until=statuses))
-    read_payload = herdr(["agent", "read", target, "--source", "recent-unwrapped"])
+    send_payload = herdr(prompt_argv(resolved, text, wait=True, timeout=timeout, until=statuses))
+    read_payload = herdr(["agent", "read", resolved, "--source", "recent-unwrapped"])
     return emit_ok({"status": send_payload, "reply": read_payload})
 
 
 COMMANDS = {
-    "list": cmd_list,
-    "read": cmd_read,
-    "send": cmd_send,
-    "wait": cmd_wait,
+    "workspaces": cmd_workspaces,
+    "tabs": cmd_tabs,
+    "list": cmd_tabs,
+    "spawn": cmd_spawn,
     "start": cmd_start,
+    "send": cmd_send,
+    "read": cmd_read,
+    "wait": cmd_wait,
     "ask": cmd_ask,
 }
 
@@ -233,10 +381,9 @@ def main(argv=None):
     if not argv or argv[0] in ("-h", "--help", "help"):
         sys.stdout.write(USAGE)
         return 0
-    command = argv[0]
-    handler = COMMANDS.get(command)
+    handler = COMMANDS.get(argv[0])
     if handler is None:
-        return emit_err(f"unknown command: {command}", "USAGE")
+        return emit_err(f"unknown command: {argv[0]}", "USAGE")
     try:
         return handler(argv[1:])
     except HerdrError as error:

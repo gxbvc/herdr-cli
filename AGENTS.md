@@ -1,30 +1,27 @@
 # agents-cli
 
-Thin wrapper around `herdr agent`. Prompt text is one execve argv, never a shell string. Do not patch herdr.
+Talk to herdr in workspaces and tabs. Do not pass pane ids. Do not patch herdr.
 
 ## Commands
 
 ```bash
-agents-cli list
-agents-cli read <target> [--lines N] [--source SOURCE]
-agents-cli send <target> [--file PATH] [--wait] [--timeout MS] [--until STATUS] [text...]
-cat report.md | agents-cli send <target> --wait
-agents-cli wait <target> [--until idle|done|blocked] [--timeout MS]
-agents-cli start <name> --kind KIND --pane ID [--retries N] [--retry-delay MS]
-agents-cli ask <target> --file task.md --timeout MS
+agents-cli workspaces
+agents-cli tabs --workspace admin
+agents-cli spawn research --workspace admin --cwd ~/projects/admin
+agents-cli start research --tab w7:t37 --kind pi
+cat task.md | agents-cli send w7:t37 --wait
+agents-cli ask research --file task.md --timeout 60000
+agents-cli read w7:t37
+agents-cli wait w7:t37
 ```
 
-JSON envelope: `{"ok":true,"data":...}` or `{"ok":false,"error":"...","code":"..."}`.
+Target is a **tab id** (`w7:t37`) or an agent **name**. `--kind` defaults to `pi`. `spawn` creates a tab (`--no-focus`) then starts the agent.
 
-## Why this exists
-
-`herdr agent prompt TARGET -- TEXT` treats TEXT as an option. `herdr agent prompt -- "$(cat report.md)"` treats a leading `#` as an option. `herdr agent start` on a new pane can return `agent_pane_busy` until the shell boots.
-
-Use this CLI instead of building a shell string for herdr.
+JSON: `{"ok":true,"data":...}` or `{"ok":false,"error":"...","code":"..."}`.
 
 ## Notes
 
-- Target is a herdr agent name or pane id (`w7:p1`).
-- `start` retries `agent_pane_busy` / `agent_not_ready` (default 10 x 500ms).
-- `ask` is `send --wait` then `read --source recent-unwrapped`.
-- Session history/restore stays in `herdr-agents-cli`.
+- A tab is the top-bar item in a workspace. The terminal inside it is a pane; this CLI hides that.
+- Prompt text is one argv, so leading `#` and `--` are safe. Prefer `--file` or stdin.
+- `start` retries `agent_pane_busy` until the new tab's shell is up.
+- Snapshots/restore stay in `herdr-agents-cli`.
