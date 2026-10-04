@@ -5,7 +5,7 @@ import importlib.machinery
 import importlib.util
 from pathlib import Path
 
-LOADER = importlib.machinery.SourceFileLoader("agentscli", str(Path(__file__).with_name("agents-cli")))
+LOADER = importlib.machinery.SourceFileLoader("agentscli", str(Path(__file__).with_name("herdr-cli")))
 SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
 MOD = importlib.util.module_from_spec(SPEC)
 LOADER.exec_module(MOD)

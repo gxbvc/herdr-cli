@@ -6,28 +6,36 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
 
 HERDR = os.environ.get("HERDR", "herdr")
 BUSY = ("agent_pane_busy", "agent_not_ready")
-TAB_ID = re.compile(r"^w[0-9]+:t\S+$")
+TAB_ID = re.compile(r"^w[0-9A-Za-z]+:t\S+$")
+STAR = "\u2b50"
 
 USAGE = """\
 Usage:
-  agents-cli workspaces
-  agents-cli tabs [--workspace ID|label]
-  agents-cli spawn <name> --workspace ID|label [--kind KIND] [--cwd PATH] [--label TEXT]
-  agents-cli start <name> --tab TAB_ID [--kind KIND]
-  agents-cli send <tab|name> [--file PATH] [--wait] [--timeout MS] [--until STATUS] [text...]
-  agents-cli read <tab|name> [--lines N] [--source SOURCE]
-  agents-cli wait <tab|name> [--until STATUS] [--timeout MS]
-  agents-cli ask <tab|name> [--file PATH] [--timeout MS] [--until STATUS] [text...]
+  herdr-cli workspaces
+  herdr-cli tabs [--workspace ID|label]
+  herdr-cli spawn <name> --workspace ID|label [--kind KIND] [--cwd PATH] [--label TEXT] [--index N]
+  herdr-cli start <name> --tab TAB_ID [--kind KIND]
+  herdr-cli send <tab|name> [--file PATH] [--wait] [--timeout MS] [--until STATUS] [text...]
+  herdr-cli read <tab|name> [--lines N] [--source SOURCE]
+  herdr-cli wait <tab|name> [--until STATUS] [--timeout MS]
+  herdr-cli ask <tab|name> [--file PATH] [--timeout MS] [--until STATUS] [text...]
+  herdr-cli star <tab|name>... | unstar <tab|name>... | unstar --all [--workspace ID|label]
+  herdr-cli rename <tab|name> <label>
+  herdr-cli move <tab|name> --index N
+  herdr-cli move-workspace <ID|label> --index N
+  herdr-cli status [--workspace ID|label] [--stale-hours N] [--questions] [--pretty]
 
 The unit is a tab in a workspace. Prompt text comes from --file, args, or stdin
 and is passed to herdr as one argv element, so leading # and -- are safe.
-Default --kind is pi. spawn always uses --no-focus.
+Default --kind is pi. spawn always uses --no-focus. A star is a leading star
+emoji on the tab label (pios reads the same prefix). Index 0 is leftmost.
 """
 
 
@@ -97,6 +105,30 @@ def herdr(argv, timeout=None):
     if isinstance(payload, dict) and "result" in payload:
         return payload["result"]
     return payload
+
+
+def socket_call(method, params):
+    """Raw socket API call for methods the herdr CLI does not expose (tab.move, workspace.move)."""
+    path = os.environ.get("HERDR_SOCKET_PATH") or os.path.expanduser("~/.config/herdr/herdr.sock")
+    request = {"id": f"herdr-cli-{os.getpid()}", "method": method, "params": params}
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(10)
+            sock.connect(path)
+            sock.sendall((json.dumps(request) + "\n").encode())
+            buffer = b""
+            while b"\n" not in buffer:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                buffer += chunk
+    except OSError as error:
+        raise HerdrError(f"herdr socket: {error}", "HERDR_MISSING") from error
+    response = json.loads(buffer.split(b"\n", 1)[0] or b"{}")
+    if "error" in response:
+        error = response["error"] or {}
+        raise HerdrError(error.get("message") or str(error), error.get("code") or "HERDR")
+    return response.get("result") or {}
 
 
 def prompt_argv(target, text, wait=False, timeout=None, until=None):
@@ -192,6 +224,24 @@ def resolve_target(target):
     return target
 
 
+def resolve_tab_id(target):
+    """Tab id from a tab id or an agent name."""
+    if TAB_ID.match(target):
+        return target
+    for agent in agents():
+        if target == agent.get("name"):
+            return agent["tab_id"]
+    raise HerdrError(f"no tab or agent named {target}", "NOT_FOUND")
+
+
+def tab_info(tab_id):
+    return herdr(["tab", "get", tab_id]).get("tab") or {}
+
+
+def strip_star(label):
+    return re.sub(rf"^{STAR}\s*", "", label or "")
+
+
 def start_on_pane(name, kind, pane_id, retries=10, delay_ms=500, timeout=None, extra=None):
     argv = ["agent", "start", name, "--kind", kind, "--pane", pane_id]
     if timeout:
@@ -246,6 +296,7 @@ def cmd_spawn(args):
     args, kind = take_flag(args, "--kind", True)
     args, cwd = take_flag(args, "--cwd", True)
     args, label = take_flag(args, "--label", True)
+    args, index = take_flag(args, "--index", True)
     extra = []
     if "--" in args:
         i = args.index("--")
@@ -268,6 +319,8 @@ def cmd_spawn(args):
             raise HerdrError("tab create did not return a tab", "HERDR")
         pane_id = pane_for_tab(tab_id)["pane_id"]
     start_on_pane(name, kind, pane_id, extra=extra)
+    if index is not None and tab_id:
+        socket_call("tab.move", {"tab_id": tab_id, "insert_index": int(index)})
     return emit_ok({
         "workspace_id": workspace_id,
         "tab_id": tab_id,
@@ -363,6 +416,145 @@ def cmd_ask(args):
     return emit_ok({"status": send_payload, "reply": read_payload})
 
 
+def set_star(tab_id, starred):
+    label = tab_info(tab_id).get("label") or ""
+    bare = strip_star(label)
+    wanted = f"{STAR} {bare}" if starred else bare
+    if wanted != label:
+        herdr(["tab", "rename", tab_id, wanted])
+    return {"tab_id": tab_id, "label": wanted, "starred": starred, "changed": wanted != label}
+
+
+def cmd_star(args, starred=True):
+    args, every = take_flag(args, "--all")
+    args, workspace = take_flag(args, "--workspace", True)
+    if every:
+        if starred:
+            raise HerdrError("--all only works with unstar", "USAGE")
+        argv = ["tab", "list"]
+        if workspace:
+            argv.extend(["--workspace", resolve_workspace(workspace)["workspace_id"]])
+        targets = [t["tab_id"] for t in herdr(argv).get("tabs") or [] if (t.get("label") or "").startswith(STAR)]
+    else:
+        if not args:
+            raise HerdrError("star needs a tab or name", "USAGE")
+        targets = [resolve_tab_id(arg) for arg in args]
+    return emit_ok({"tabs": [set_star(tab_id, starred) for tab_id in targets]})
+
+
+def cmd_unstar(args):
+    return cmd_star(args, starred=False)
+
+
+def cmd_rename(args):
+    if len(args) < 2:
+        raise HerdrError("rename needs a tab and a label", "USAGE")
+    tab_id = resolve_tab_id(args[0])
+    herdr(["tab", "rename", tab_id, " ".join(args[1:])])
+    return emit_ok({"tab_id": tab_id, "label": " ".join(args[1:])})
+
+
+def cmd_move(args):
+    args, index = take_flag(args, "--index", True)
+    if not args or index is None:
+        raise HerdrError("move needs a tab and --index N", "USAGE")
+    tab_id = resolve_tab_id(args[0])
+    socket_call("tab.move", {"tab_id": tab_id, "insert_index": int(index)})
+    return emit_ok({"tab_id": tab_id, "index": int(index)})
+
+
+def cmd_move_workspace(args):
+    args, index = take_flag(args, "--index", True)
+    if not args or index is None:
+        raise HerdrError("move-workspace needs a workspace and --index N", "USAGE")
+    workspace_id = resolve_workspace(args[0])["workspace_id"]
+    socket_call("workspace.move", {"workspace_id": workspace_id, "insert_index": int(index)})
+    return emit_ok({"workspace_id": workspace_id, "index": int(index)})
+
+
+def session_facts(path):
+    """Deterministic facts from a pi session file. No LLM."""
+    facts = {"idle_hours": None, "ends_with_question": False, "last_user_at": None,
+             "last_assistant_at": None, "context_tokens": None, "last_assistant_tail": None}
+    if not path or not os.path.exists(path):
+        return facts
+    facts["idle_hours"] = round((time.time() - os.path.getmtime(path)) / 3600, 1)
+    last_text = ""
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if '"type":"message"' not in line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            message = record.get("message") or {}
+            role = message.get("role")
+            content = message.get("content")
+            if isinstance(content, str):
+                text = content
+            else:
+                text = "\n".join(c.get("text", "") for c in content or [] if isinstance(c, dict) and c.get("type") == "text")
+            if role == "user" and text.strip() and not text.startswith("Subagent progress"):
+                facts["last_user_at"] = record.get("timestamp")
+            elif role == "assistant":
+                usage = message.get("usage") or {}
+                if usage.get("totalTokens"):
+                    facts["context_tokens"] = usage["totalTokens"]
+                if text.strip():
+                    last_text = text.strip()
+                    facts["last_assistant_at"] = record.get("timestamp")
+    facts["ends_with_question"] = last_text.rstrip("*_ )\n").endswith("?")
+    facts["last_assistant_tail"] = last_text[-300:] if last_text else None
+    return facts
+
+
+def cmd_status(args):
+    args, workspace = take_flag(args, "--workspace", True)
+    args, stale = take_flag(args, "--stale-hours", True)
+    args, questions = take_flag(args, "--questions")
+    args, pretty = take_flag(args, "--pretty")
+    spaces = {w["workspace_id"]: w for w in workspaces()}
+    wanted = resolve_workspace(workspace)["workspace_id"] if workspace else None
+    labels = {}
+    for workspace_id in ([wanted] if wanted else spaces):
+        for index, tab in enumerate(herdr(["tab", "list", "--workspace", workspace_id]).get("tabs") or []):
+            labels[tab["tab_id"]] = (index, tab.get("label") or "")
+    rows = []
+    for agent in agents():
+        if agent.get("tab_id") not in labels:
+            continue
+        index, label = labels[agent["tab_id"]]
+        facts = session_facts((agent.get("agent_session") or {}).get("value"))
+        row = {
+            "workspace": spaces.get(agent["workspace_id"], {}).get("label"),
+            "workspace_id": agent["workspace_id"],
+            "tab_id": agent["tab_id"],
+            "index": index,
+            "label": label,
+            "starred": label.startswith(STAR),
+            "name": agent.get("name"),
+            "status": agent.get("agent_status"),
+            "cwd": agent.get("cwd"),
+            "session": (agent.get("agent_session") or {}).get("value"),
+            **facts,
+        }
+        if stale and (row["idle_hours"] is None or row["idle_hours"] < float(stale)):
+            continue
+        if questions and not row["ends_with_question"]:
+            continue
+        rows.append(row)
+    rows.sort(key=lambda r: (r["workspace_id"], r["index"]))
+    if pretty:
+        for r in rows:
+            idle = f"{r['idle_hours']:6.1f}h" if r["idle_hours"] is not None else "    n/a"
+            ctx = f"{(r['context_tokens'] or 0) // 1000:4d}k"
+            q = "?" if r["ends_with_question"] else " "
+            sys.stdout.write(f"{(r['workspace'] or '')[:12]:12} {r['tab_id']:9} {idle} {ctx} {r['status'] or '':8} {q} {r['label']}\n")
+        return 0
+    return emit_ok({"tabs": rows})
+
+
 COMMANDS = {
     "workspaces": cmd_workspaces,
     "tabs": cmd_tabs,
@@ -373,6 +565,12 @@ COMMANDS = {
     "read": cmd_read,
     "wait": cmd_wait,
     "ask": cmd_ask,
+    "star": cmd_star,
+    "unstar": cmd_unstar,
+    "rename": cmd_rename,
+    "move": cmd_move,
+    "move-workspace": cmd_move_workspace,
+    "status": cmd_status,
 }
 
 
