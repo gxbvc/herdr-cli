@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import unittest
+from unittest.mock import patch
+import tempfile
 
 import importlib.machinery
 import importlib.util
@@ -22,6 +24,19 @@ class PromptArgvTest(unittest.TestCase):
         argv = MOD.prompt_argv("bot", "hello", wait=True, timeout="5000", until=["idle", "done"])
         self.assertEqual(argv[3], "hello")
         self.assertEqual(argv[4:], ["--wait", "--until", "idle", "--until", "done", "--timeout", "5000"])
+
+
+class JournalSendTest(unittest.TestCase):
+    def test_journal_failure_does_not_fail_successful_file_send(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "private-prompt.md"
+            path.write_text("private prompt from a file")
+            with patch.object(MOD, "resolve_target", return_value="w7:pC1"), \
+                 patch.object(MOD, "herdr", return_value={"sent": True}) as herdr, \
+                 patch.object(MOD, "journal_send", side_effect=OSError(28, "disk full")), \
+                 patch.object(MOD, "emit_ok", return_value=0):
+                self.assertEqual(MOD.cmd_send(["w7:tC1", "--file", str(path)]), 0)
+                self.assertEqual(herdr.call_args.args[0][3], "private prompt from a file")
 
 
 class TabSurfaceTest(unittest.TestCase):

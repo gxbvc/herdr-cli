@@ -349,6 +349,21 @@ def cmd_start(args):
     return emit_ok({"tab_id": tab_id, "name": name, "kind": kind or "pi"})
 
 
+def journal_send(target):
+    """Best effort; never read or pass prompt text into the HQ journal."""
+    try:
+        import importlib.util
+        from pathlib import Path
+        path = Path.home() / "projects/hq/bin/live_journal.py"
+        spec = importlib.util.spec_from_file_location("gxb_live_journal", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.try_append({"type": "message", "fromId": os.environ.get("HERDR_TAB_ID", "external"),
+                           "toId": resolve_tab_id(target)})
+    except Exception:
+        pass
+
+
 def cmd_send(args):
     args, wait = take_flag(args, "--wait")
     args, timeout = take_flag(args, "--timeout", True)
@@ -365,6 +380,10 @@ def cmd_send(args):
     payload = herdr(
         prompt_argv(resolve_target(target), text, wait=bool(wait), timeout=timeout, until=until or None)
     )
+    try:
+        journal_send(target)
+    except Exception:
+        pass
     return emit_ok(payload)
 
 
