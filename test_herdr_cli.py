@@ -35,7 +35,7 @@ class JournalSendTest(unittest.TestCase):
                  patch.object(MOD, "herdr", return_value={"sent": True}) as herdr, \
                  patch.object(MOD, "journal_send", side_effect=OSError(28, "disk full")), \
                  patch.object(MOD, "emit_ok", return_value=0):
-                self.assertEqual(MOD.cmd_send(["w7:tC1", "--file", str(path)]), 0)
+                self.assertEqual(MOD.cmd_send(["w7:tC1", "--no-prefix", "--file", str(path)]), 0)
                 self.assertEqual(herdr.call_args.args[0][3], "private prompt from a file")
 
 
@@ -66,6 +66,27 @@ class TabSurfaceTest(unittest.TestCase):
         self.assertEqual(row["tab_id"], "w7:t1")
         self.assertEqual(row["name"], "research")
         self.assertEqual(row["kind"], "pi")
+
+
+class SenderPrefixTest(unittest.TestCase):
+    def test_prefix_names_workspace_tab_and_label(self):
+        env = {"HERDR_TAB_ID": "wH:tE", "HERDR_WORKSPACE_ID": "wH"}
+        with patch.dict(MOD.os.environ, env, clear=False), \
+             patch.object(MOD, "workspaces", return_value=[{"workspace_id": "wH", "label": "gov"}]), \
+             patch.object(MOD, "tab_info", return_value={"label": "\u2b50 Manager"}):
+            self.assertEqual(MOD.sender_prefix("hello"), "[gov wH:tE Manager] ")
+            self.assertEqual(MOD.sender_prefix("[gov wH:tE Manager] hello"), "")
+
+    def test_no_prefix_outside_herdr(self):
+        with patch.dict(MOD.os.environ, {}, clear=True):
+            self.assertEqual(MOD.sender_prefix("hello"), "")
+
+    def test_lookup_failure_still_gives_ids(self):
+        env = {"HERDR_TAB_ID": "w7:tC1", "HERDR_WORKSPACE_ID": "w7"}
+        with patch.dict(MOD.os.environ, env, clear=False), \
+             patch.object(MOD, "workspaces", side_effect=Exception("down")), \
+             patch.object(MOD, "tab_info", side_effect=Exception("down")):
+            self.assertEqual(MOD.sender_prefix("hi"), "[w7 w7:tC1] ")
 
 
 if __name__ == "__main__":

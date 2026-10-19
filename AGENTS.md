@@ -10,6 +10,9 @@ herdr-cli tabs --workspace admin
 herdr-cli spawn research --workspace admin --cwd ~/projects/admin [--index 1]
 herdr-cli start research --tab w7:t37 --kind pi
 cat task.md | herdr-cli send w7:t37 --wait
+# From inside a herdr tab, send and ask start the text with "[<workspace> <tab id> <label>] "
+# (for example "[gov wH:tE Manager] "), so the reader knows the sender. Slash commands
+# like /new get no prefix; --no-prefix turns it off.
 herdr-cli ask research --file task.md --timeout 60000
 herdr-cli read w7:t37
 herdr-cli wait w7:t37

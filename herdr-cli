@@ -22,10 +22,10 @@ Usage:
   herdr-cli tabs [--workspace ID|label]
   herdr-cli spawn <name> --workspace ID|label [--kind KIND] [--cwd PATH] [--label TEXT] [--index N]
   herdr-cli start <name> --tab TAB_ID [--kind KIND]
-  herdr-cli send <tab|name> [--file PATH] [--wait] [--timeout MS] [--until STATUS] [text...]
+  herdr-cli send <tab|name> [--no-prefix] [--file PATH] [--wait] [--timeout MS] [--until STATUS] [text...]
   herdr-cli read <tab|name> [--lines N] [--source SOURCE]
   herdr-cli wait <tab|name> [--until STATUS] [--timeout MS]
-  herdr-cli ask <tab|name> [--file PATH] [--timeout MS] [--until STATUS] [text...]
+  herdr-cli ask <tab|name> [--no-prefix] [--file PATH] [--timeout MS] [--until STATUS] [text...]
   herdr-cli star <tab|name>... | unstar <tab|name>... | unstar --all [--workspace ID|label]
   herdr-cli rename <tab|name> <label>
   herdr-cli move <tab|name> --index N
@@ -364,6 +364,26 @@ def journal_send(target):
         pass
 
 
+def sender_prefix(text):
+    """'[gov wH:tE Manager] ' for a send from inside a herdr tab (Christian, 2026-10-19), so the
+    reader always knows the workspace name, tab id and tab label of the sender."""
+    tab_id = os.environ.get("HERDR_TAB_ID")
+    if not tab_id or text.lstrip().startswith("/"):  # a slash command like /new must stay first
+        return ""
+    workspace_id = os.environ.get("HERDR_WORKSPACE_ID") or tab_id.split(":", 1)[0]
+    try:
+        workspace = next((w.get("label") for w in workspaces() if w.get("workspace_id") == workspace_id), None)
+    except Exception:
+        workspace = None
+    try:
+        label = strip_star(tab_info(tab_id).get("label") or "").strip()
+    except Exception:
+        label = ""
+    parts = [workspace or workspace_id, tab_id] + ([label] if label else [])
+    prefix = "[" + " ".join(parts) + "] "
+    return "" if text.lstrip().startswith(prefix.strip()) else prefix
+
+
 def cmd_send(args):
     args, wait = take_flag(args, "--wait")
     args, timeout = take_flag(args, "--timeout", True)
@@ -374,9 +394,12 @@ def cmd_send(args):
     if not args:
         raise HerdrError("send needs a tab or name", "USAGE")
     target, args = args[0], args[1:]
+    args, skip = take_flag(args, "--no-prefix")
     args, text = read_prompt(args)
     if not text:
         raise HerdrError("prompt text is empty", "USAGE")
+    if not skip:
+        text = sender_prefix(text) + text
     payload = herdr(
         prompt_argv(resolve_target(target), text, wait=bool(wait), timeout=timeout, until=until or None)
     )
@@ -425,9 +448,12 @@ def cmd_ask(args):
     if not args:
         raise HerdrError("ask needs a tab or name", "USAGE")
     target, args = args[0], args[1:]
+    args, skip = take_flag(args, "--no-prefix")
     args, text = read_prompt(args)
     if not text:
         raise HerdrError("prompt text is empty", "USAGE")
+    if not skip:
+        text = sender_prefix(text) + text
     resolved = resolve_target(target)
     statuses = until or ["idle", "done", "blocked"]
     send_payload = herdr(prompt_argv(resolved, text, wait=True, timeout=timeout, until=statuses))
