@@ -15,6 +15,8 @@ HERDR = os.environ.get("HERDR", "herdr")
 BUSY = ("agent_pane_busy", "agent_not_ready")
 TAB_ID = re.compile(r"^w[0-9A-Za-z]+:t\S+$")
 STAR = "\u2b50"
+# Old names that still work after a rename (the Admin manager became Misc on 2026-10-22).
+ALIASES = {"admin": "misc"}
 
 USAGE = """\
 Usage:
@@ -193,9 +195,10 @@ def workspaces():
 
 
 def resolve_workspace(token):
-    for workspace in workspaces():
-        if token in (workspace.get("workspace_id"), workspace.get("label")):
-            return workspace
+    for candidate in (token, ALIASES.get(token)):
+        for workspace in workspaces():
+            if candidate and candidate in (workspace.get("workspace_id"), workspace.get("label")):
+                return workspace
     raise HerdrError(f"workspace not found: {token}", "NOT_FOUND")
 
 
@@ -216,9 +219,10 @@ def agents():
 
 
 def resolve_target(target):
-    for agent in agents():
-        if target in (agent.get("name"), agent.get("tab_id")):
-            return agent.get("name") or agent["pane_id"]
+    for candidate in (target, ALIASES.get(target)):
+        for agent in agents():
+            if candidate and candidate in (agent.get("name"), agent.get("tab_id")):
+                return agent.get("name") or agent["pane_id"]
     if TAB_ID.match(target):
         return pane_for_tab(target)["pane_id"]
     return target
@@ -228,9 +232,10 @@ def resolve_tab_id(target):
     """Tab id from a tab id or an agent name."""
     if TAB_ID.match(target):
         return target
-    for agent in agents():
-        if target == agent.get("name"):
-            return agent["tab_id"]
+    for candidate in (target, ALIASES.get(target)):
+        for agent in agents():
+            if candidate and candidate == agent.get("name"):
+                return agent["tab_id"]
     raise HerdrError(f"no tab or agent named {target}", "NOT_FOUND")
 
 
