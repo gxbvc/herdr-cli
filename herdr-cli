@@ -17,6 +17,11 @@ TAB_ID = re.compile(r"^w[0-9A-Za-z]+:t\S+$")
 STAR = "\u2b50"
 # Old names that still work after a rename (the Admin manager became Misc on 2026-10-22).
 ALIASES = {"admin": "misc"}
+# Agent kinds herdr 0.9.1 cannot prompt (agent prompt answers agent_not_ready). send types the text
+# into the pane and presses Enter instead (Overseer, Nov 8: rpi tabs must hear heartbeats, todo-hook,
+# the router, the comms spawner and manager messages). A newline in send-text stays in rpi's input box.
+PANE_SEND_KINDS = ("rpi",)
+PANE_SEND_TIMEOUT = 3
 
 USAGE = """\
 Usage:
@@ -228,6 +233,22 @@ def resolve_target(target):
     return target
 
 
+def target_agent(target):
+    """The agent row for a name or tab id, or None."""
+    for candidate in (target, ALIASES.get(target)):
+        for agent in agents():
+            if candidate and candidate in (agent.get("name"), agent.get("tab_id")):
+                return agent
+    return None
+
+
+def pane_send(pane_id, text):
+    """Type text into a pane, then Enter. Each step has a hard 3 s timeout."""
+    herdr(["pane", "send-text", pane_id, text], timeout=PANE_SEND_TIMEOUT)
+    herdr(["pane", "send-keys", pane_id, "enter"], timeout=PANE_SEND_TIMEOUT)
+    return {"pane_id": pane_id, "via": "pane-send-text"}
+
+
 def resolve_tab_id(target):
     """Tab id from a tab id or an agent name."""
     if TAB_ID.match(target):
@@ -405,9 +426,16 @@ def cmd_send(args):
         raise HerdrError("prompt text is empty", "USAGE")
     if not skip:
         text = sender_prefix(text) + text
-    payload = herdr(
-        prompt_argv(resolve_target(target), text, wait=bool(wait), timeout=timeout, until=until or None)
-    )
+    agent = target_agent(target)
+    if agent and agent.get("agent") in PANE_SEND_KINDS:
+        if wait or until:
+            raise HerdrError(f"--wait/--until are not supported for kind {agent.get('agent')}", "USAGE")
+        payload = pane_send(agent["pane_id"], text)
+        payload["kind"] = agent.get("agent")
+    else:
+        payload = herdr(
+            prompt_argv(resolve_target(target), text, wait=bool(wait), timeout=timeout, until=until or None)
+        )
     try:
         journal_send(target)
     except Exception:

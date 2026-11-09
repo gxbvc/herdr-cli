@@ -89,5 +89,61 @@ class SenderPrefixTest(unittest.TestCase):
             self.assertEqual(MOD.sender_prefix("hi"), "[w7 w7:tC1] ")
 
 
+class RpiSendTest(unittest.TestCase):
+    """herdr 0.9.1 cannot `agent prompt` an rpi tab; send types into the pane and presses Enter."""
+
+    RPI = {"name": "rpi-test", "tab_id": "w37:t2", "pane_id": "w37:p2", "agent": "rpi"}
+    PI = {"name": "misc", "tab_id": "w7:tC1", "pane_id": "w7:pC1", "agent": "pi"}
+
+    def run_send(self, argv, rows):
+        calls = []
+
+        def fake(args, timeout=None):
+            calls.append((list(args), timeout))
+            if args[:2] == ["agent", "list"]:
+                return {"agents": rows}
+            return {}
+
+        with patch.object(MOD, "herdr", side_effect=fake), \
+             patch.object(MOD, "journal_send", return_value=None), \
+             patch.object(MOD, "emit_ok", side_effect=lambda data: data):
+            out = MOD.cmd_send(argv)
+        return out, [c for c in calls if c[0][:2] != ["agent", "list"]]
+
+    def test_rpi_by_name_uses_send_text_then_enter_with_3s_timeouts(self):
+        out, calls = self.run_send(["rpi-test", "--no-prefix", "line one\nline two"], [self.RPI])
+        self.assertEqual(calls, [(["pane", "send-text", "w37:p2", "line one\nline two"], 3),
+                                 (["pane", "send-keys", "w37:p2", "enter"], 3)])
+        self.assertEqual(out["kind"], "rpi")
+
+    def test_rpi_by_tab_id(self):
+        _, calls = self.run_send(["w37:t2", "--no-prefix", "hi"], [self.RPI])
+        self.assertEqual(calls[0][0][:3], ["pane", "send-text", "w37:p2"])
+
+    def test_pi_still_uses_agent_prompt(self):
+        _, calls = self.run_send(["misc", "--no-prefix", "hi"], [self.PI])
+        self.assertEqual(calls, [(["agent", "prompt", "misc", "hi"], None)])
+
+    def test_rpi_wait_is_refused(self):
+        with self.assertRaises(MOD.HerdrError):
+            self.run_send(["rpi-test", "--no-prefix", "--wait", "hi"], [self.RPI])
+
+    def test_send_text_failure_never_presses_enter(self):
+        calls = []
+
+        def fake(args, timeout=None):
+            calls.append(list(args))
+            if args[:2] == ["agent", "list"]:
+                return {"agents": [self.RPI]}
+            if args[:2] == ["pane", "send-text"]:
+                raise MOD.HerdrError("herdr timed out", "TIMEOUT")
+            return {}
+
+        with patch.object(MOD, "herdr", side_effect=fake), patch.object(MOD, "journal_send", return_value=None):
+            with self.assertRaises(MOD.HerdrError):
+                MOD.cmd_send(["rpi-test", "--no-prefix", "hi"])
+        self.assertNotIn(["pane", "send-keys", "w37:p2", "enter"], calls)
+
+
 if __name__ == "__main__":
     unittest.main()
