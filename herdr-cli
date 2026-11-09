@@ -273,16 +273,23 @@ RPI_BIN = os.path.expanduser(os.environ.get("HERDR_CLI_RPI", "~/.local/bin/rpi")
 RPI_SESSIONS = os.path.expanduser(os.environ.get("HERDR_CLI_RPI_SESSIONS", "~/.rpi/agent/sessions"))
 
 
+def _listdir(path):
+    try:
+        return os.listdir(path)
+    except OSError:
+        return []
+
+
 def agent_session_path(agent):
     """pi: herdr reports the session. rpi: the newest file in the per-name dir that `start` passes as --session-dir."""
     path = (agent.get("agent_session") or {}).get("value")
     if path or agent.get("agent") not in PANE_SEND_KINDS or not agent.get("name"):
         return path
     folder = os.path.join(RPI_SESSIONS, agent["name"])
-    try:
-        files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".jsonl")]
-    except OSError:
-        return None
+    files = []
+    # rpi nests one more level per cwd (--private-tmp--/...jsonl); also accept files at the top.
+    for base in [folder] + [os.path.join(folder, d) for d in _listdir(folder) if d.startswith("--")]:
+        files += [os.path.join(base, f) for f in _listdir(base) if f.endswith(".jsonl")]
     return max(files, key=os.path.getmtime) if files else None
 
 

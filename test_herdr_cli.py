@@ -226,9 +226,9 @@ class RpiSessionTest(unittest.TestCase):
 
     def test_status_session_for_rpi_reads_newest_file_and_epoch_ms(self):
         tmp = tempfile.mkdtemp()
-        os.makedirs(os.path.join(tmp, "mgr-x"))
+        os.makedirs(os.path.join(tmp, "mgr-x", "--private-tmp--"))
         old = os.path.join(tmp, "mgr-x", "a.jsonl")
-        new = os.path.join(tmp, "mgr-x", "b.jsonl")
+        new = os.path.join(tmp, "mgr-x", "--private-tmp--", "b.jsonl")
         open(old, "w").write("")
         line = json.dumps({"kind": "entry", "type": "message", "timestamp": 1794194871548,
                            "message": {"role": "assistant", "content": [{"type": "text", "text": "Ready?"}],
