@@ -270,13 +270,34 @@ def strip_star(label):
 
 
 RPI_BIN = os.path.expanduser(os.environ.get("HERDR_CLI_RPI", "~/.local/bin/rpi"))
+RPI_SESSIONS = os.path.expanduser(os.environ.get("HERDR_CLI_RPI_SESSIONS", "~/.rpi/agent/sessions"))
+
+
+def agent_session_path(agent):
+    """pi: herdr reports the session. rpi: the newest file in the per-name dir that `start` passes as --session-dir."""
+    path = (agent.get("agent_session") or {}).get("value")
+    if path or agent.get("agent") not in PANE_SEND_KINDS or not agent.get("name"):
+        return path
+    folder = os.path.join(RPI_SESSIONS, agent["name"])
+    try:
+        files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".jsonl")]
+    except OSError:
+        return None
+    return max(files, key=os.path.getmtime) if files else None
 
 
 def start_rpi_on_pane(name, pane_id, extra=None, wait_s=20):
     """herdr 0.9.1 cannot `agent start --kind rpi`. Run rpi in the pane; rpi reports its own lifecycle
     (idle/working/done) to herdr; once the pane shows agent rpi, name it so send-by-name, status and
     `tabs` work."""
-    herdr(["pane", "run", pane_id, shlex.join([RPI_BIN, *(extra or [])])], timeout=10)
+    extra = list(extra or [])
+    if "--session-dir" not in extra:
+        # rpi 0.21.1 stores sessions in <cwd>/.rpi/sessions, i.e. inside project repos. Keep them in one place,
+        # per agent name, so `status` can find them (herdr does not report rpi sessions).
+        session_dir = os.path.join(RPI_SESSIONS, name)
+        os.makedirs(session_dir, mode=0o700, exist_ok=True)
+        extra += ["--session-dir", session_dir]
+    herdr(["pane", "run", pane_id, shlex.join([RPI_BIN, *extra])], timeout=10)
     deadline = time.monotonic() + wait_s
     while time.monotonic() < deadline:
         row = next((a for a in agents() if a.get("pane_id") == pane_id), None)
@@ -598,6 +619,10 @@ def session_facts(path):
                 text = content
             else:
                 text = "\n".join(c.get("text", "") for c in content or [] if isinstance(c, dict) and c.get("type") == "text")
+            stamp = record.get("timestamp")
+            if isinstance(stamp, (int, float)):  # rpi writes epoch ms; pi writes ISO strings
+                stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(stamp / 1000)) + f".{int(stamp) % 1000:03d}Z"
+                record["timestamp"] = stamp
             if role == "user" and text.strip() and not text.startswith("Subagent progress"):
                 facts["last_user_at"] = record.get("timestamp")
             elif role == "assistant":
@@ -628,7 +653,8 @@ def cmd_status(args):
         if agent.get("tab_id") not in labels:
             continue
         index, label = labels[agent["tab_id"]]
-        facts = session_facts((agent.get("agent_session") or {}).get("value"))
+        session = agent_session_path(agent)
+        facts = session_facts(session)
         row = {
             "workspace": spaces.get(agent["workspace_id"], {}).get("label"),
             "workspace_id": agent["workspace_id"],
@@ -639,7 +665,8 @@ def cmd_status(args):
             "name": agent.get("name"),
             "status": agent.get("agent_status"),
             "cwd": agent.get("cwd"),
-            "session": (agent.get("agent_session") or {}).get("value"),
+            "kind": agent.get("agent"),
+            "session": session,
             **facts,
         }
         if stale and (row["idle_hours"] is None or row["idle_hours"] < float(stale)):

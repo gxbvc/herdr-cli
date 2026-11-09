@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import unittest
+import os
+import json
 from unittest.mock import patch
 import tempfile
 
@@ -168,11 +170,12 @@ class RpiStartTest(unittest.TestCase):
         with patch.object(MOD, "herdr", side_effect=self.fake_herdr(calls)), \
              patch.object(MOD, "pane_for_tab", return_value={"pane_id": "w7:pY4"}), \
              patch.object(MOD.time, "sleep", return_value=None), \
-             patch.object(MOD, "emit_ok", side_effect=lambda data: data):
+             patch.object(MOD, "emit_ok", side_effect=lambda data: data), \
+             patch.object(MOD, "RPI_SESSIONS", tempfile.mkdtemp()):
             out = MOD.cmd_start(["lane1", "--tab", "w7:tY4", "--kind", "rpi", "--model", "cliproxy-fireworks/glm-5p3-flash"])
         run = [c for c in calls if c[:2] == ["pane", "run"]][0]
         self.assertEqual(run[2], "w7:pY4")
-        self.assertTrue(run[3].endswith("rpi --model cliproxy-fireworks/glm-5p3-flash"))
+        self.assertIn("rpi --model cliproxy-fireworks/glm-5p3-flash --session-dir ", run[3])
         self.assertIn(["agent", "rename", "w7:pY4", "lane1"], calls)
         self.assertNotIn("start", [c[1] for c in calls if c[0] == "agent"])
         self.assertEqual(out["kind"], "rpi")
@@ -182,7 +185,8 @@ class RpiStartTest(unittest.TestCase):
         with patch.object(MOD, "herdr", side_effect=self.fake_herdr(calls, report_after=10**6)), \
              patch.object(MOD, "pane_for_tab", return_value={"pane_id": "w7:pY4"}), \
              patch.object(MOD.time, "sleep", return_value=None), \
-             patch.object(MOD.time, "monotonic", side_effect=[0, 0, 5, 30, 30]):
+             patch.object(MOD.time, "monotonic", side_effect=[0, 0, 5, 30, 30]), \
+             patch.object(MOD, "RPI_SESSIONS", tempfile.mkdtemp()):
             with self.assertRaises(MOD.HerdrError):
                 MOD.cmd_start(["lane1", "--tab", "w7:tY4", "--kind", "rpi"])
         self.assertFalse(any(c[:2] == ["agent", "rename"] for c in calls))
@@ -198,6 +202,48 @@ class RpiStartTest(unittest.TestCase):
     def test_old_dashdash_model_form_still_works(self):
         head, extra = MOD.split_extra(["lane3", "--", "--model", "a/b"])
         self.assertEqual((head, extra), (["lane3"], ["--model", "a/b"]))
+
+
+class RpiSessionTest(unittest.TestCase):
+    """rpi keeps sessions in <cwd>/.rpi unless told; start passes a per-name --session-dir and status reads it."""
+
+    def test_start_adds_session_dir_per_name(self):
+        calls = []
+        tmp = tempfile.mkdtemp()
+
+        def fake(args, timeout=None):
+            calls.append(list(args))
+            if args[:2] == ["agent", "list"]:
+                return {"agents": [{"pane_id": "w7:p1", "agent": "rpi"}]}
+            return {}
+
+        with patch.object(MOD, "herdr", side_effect=fake), patch.object(MOD, "RPI_SESSIONS", tmp):
+            MOD.start_rpi_on_pane("mgr-x", "w7:p1", extra=["--model", "cliproxy/claude-opus-5-5"])
+        run = [c for c in calls if c[:2] == ["pane", "run"]][0][3]
+        self.assertIn("--session-dir " + os.path.join(tmp, "mgr-x"), run)
+        self.assertTrue(os.path.isdir(os.path.join(tmp, "mgr-x")))
+        self.assertEqual(os.stat(os.path.join(tmp, "mgr-x")).st_mode & 0o777, 0o700)
+
+    def test_status_session_for_rpi_reads_newest_file_and_epoch_ms(self):
+        tmp = tempfile.mkdtemp()
+        os.makedirs(os.path.join(tmp, "mgr-x"))
+        old = os.path.join(tmp, "mgr-x", "a.jsonl")
+        new = os.path.join(tmp, "mgr-x", "b.jsonl")
+        open(old, "w").write("")
+        line = json.dumps({"kind": "entry", "type": "message", "timestamp": 1794194871548,
+                           "message": {"role": "assistant", "content": [{"type": "text", "text": "Ready?"}],
+                                       "usage": {"totalTokens": 3142}}}, separators=(",", ":"))
+        open(new, "w").write(line + "\n")
+        os.utime(old, (1, 1))
+        with patch.object(MOD, "RPI_SESSIONS", tmp):
+            path = MOD.agent_session_path({"agent": "rpi", "name": "mgr-x"})
+            self.assertEqual(path, new)
+            self.assertIsNone(MOD.agent_session_path({"agent": "rpi", "name": "other"}))
+            self.assertEqual(MOD.agent_session_path({"agent": "pi", "name": "mgr-x", "agent_session": {"value": "/p"}}), "/p")
+        facts = MOD.session_facts(path)
+        self.assertEqual(facts["context_tokens"], 3142)
+        self.assertTrue(facts["ends_with_question"])
+        self.assertTrue(facts["last_assistant_at"].startswith("2026-11-09T03:27:51"))
 
 
 if __name__ == "__main__":
