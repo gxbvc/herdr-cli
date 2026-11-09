@@ -145,5 +145,60 @@ class RpiSendTest(unittest.TestCase):
         self.assertNotIn(["pane", "send-keys", "w37:p2", "enter"], calls)
 
 
+class RpiStartTest(unittest.TestCase):
+    """herdr 0.9.1 cannot `agent start --kind rpi`: start runs rpi in the pane, waits for it to report, names it."""
+
+    def fake_herdr(self, calls, report_after=1):
+        state = {"lists": 0}
+
+        def fake(args, timeout=None):
+            calls.append(list(args))
+            if args[:2] == ["agent", "list"]:
+                state["lists"] += 1
+                kind = "rpi" if state["lists"] > report_after else None
+                return {"agents": [{"pane_id": "w7:pY4", "tab_id": "w7:tY4", "agent": kind, "name": None}]}
+            if args[:2] == ["pane", "list"]:
+                return {"panes": [{"pane_id": "w7:pY4", "tab_id": "w7:tY4"}]}
+            return {"agent": {"name": "x"}}
+
+        return fake
+
+    def test_start_rpi_runs_binary_with_model_then_renames(self):
+        calls = []
+        with patch.object(MOD, "herdr", side_effect=self.fake_herdr(calls)), \
+             patch.object(MOD, "pane_for_tab", return_value={"pane_id": "w7:pY4"}), \
+             patch.object(MOD.time, "sleep", return_value=None), \
+             patch.object(MOD, "emit_ok", side_effect=lambda data: data):
+            out = MOD.cmd_start(["lane1", "--tab", "w7:tY4", "--kind", "rpi", "--model", "cliproxy-fireworks/glm-5p3-flash"])
+        run = [c for c in calls if c[:2] == ["pane", "run"]][0]
+        self.assertEqual(run[2], "w7:pY4")
+        self.assertTrue(run[3].endswith("rpi --model cliproxy-fireworks/glm-5p3-flash"))
+        self.assertIn(["agent", "rename", "w7:pY4", "lane1"], calls)
+        self.assertNotIn("start", [c[1] for c in calls if c[0] == "agent"])
+        self.assertEqual(out["kind"], "rpi")
+
+    def test_start_rpi_times_out_without_report(self):
+        calls = []
+        with patch.object(MOD, "herdr", side_effect=self.fake_herdr(calls, report_after=10**6)), \
+             patch.object(MOD, "pane_for_tab", return_value={"pane_id": "w7:pY4"}), \
+             patch.object(MOD.time, "sleep", return_value=None), \
+             patch.object(MOD.time, "monotonic", side_effect=[0, 0, 5, 30, 30]):
+            with self.assertRaises(MOD.HerdrError):
+                MOD.cmd_start(["lane1", "--tab", "w7:tY4", "--kind", "rpi"])
+        self.assertFalse(any(c[:2] == ["agent", "rename"] for c in calls))
+
+    def test_pi_start_unchanged_and_model_flag_goes_after_dashdash(self):
+        calls = []
+        with patch.object(MOD, "herdr", side_effect=lambda a, timeout=None: calls.append(list(a)) or {}), \
+             patch.object(MOD, "pane_for_tab", return_value={"pane_id": "w7:p9"}), \
+             patch.object(MOD, "emit_ok", side_effect=lambda data: data):
+            MOD.cmd_start(["lane2", "--tab", "w7:t9", "--model", "fireworks/x"])
+        self.assertEqual(calls, [["agent", "start", "lane2", "--kind", "pi", "--pane", "w7:p9", "--", "--model", "fireworks/x"]])
+
+    def test_old_dashdash_model_form_still_works(self):
+        head, extra = MOD.split_extra(["lane3", "--", "--model", "a/b"])
+        self.assertEqual((head, extra), (["lane3"], ["--model", "a/b"]))
+
+
 if __name__ == "__main__":
     unittest.main()

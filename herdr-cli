@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -27,8 +28,8 @@ USAGE = """\
 Usage:
   herdr-cli workspaces
   herdr-cli tabs [--workspace ID|label]
-  herdr-cli spawn <name> --workspace ID|label [--kind KIND] [--cwd PATH] [--label TEXT] [--index N]
-  herdr-cli start <name> --tab TAB_ID [--kind KIND]
+  herdr-cli spawn <name> --workspace ID|label [--kind KIND] [--model M] [--cwd PATH] [--label TEXT] [--index N]
+  herdr-cli start <name> --tab TAB_ID [--kind KIND] [--model M]   (kind rpi: runs ~/.local/bin/rpi in the pane, then names it)
   herdr-cli send <tab|name> [--no-prefix] [--file PATH] [--wait] [--timeout MS] [--until STATUS] [text...]
   herdr-cli read <tab|name> [--lines N] [--source SOURCE]
   herdr-cli wait <tab|name> [--until STATUS] [--timeout MS]
@@ -268,7 +269,39 @@ def strip_star(label):
     return re.sub(rf"^{STAR}\s*", "", label or "")
 
 
+RPI_BIN = os.path.expanduser(os.environ.get("HERDR_CLI_RPI", "~/.local/bin/rpi"))
+
+
+def start_rpi_on_pane(name, pane_id, extra=None, wait_s=20):
+    """herdr 0.9.1 cannot `agent start --kind rpi`. Run rpi in the pane; rpi reports its own lifecycle
+    (idle/working/done) to herdr; once the pane shows agent rpi, name it so send-by-name, status and
+    `tabs` work."""
+    herdr(["pane", "run", pane_id, shlex.join([RPI_BIN, *(extra or [])])], timeout=10)
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        row = next((a for a in agents() if a.get("pane_id") == pane_id), None)
+        if row and row.get("agent") == "rpi":
+            return herdr(["agent", "rename", pane_id, name], timeout=10)
+        time.sleep(0.5)
+    raise HerdrError(f"rpi did not report in pane {pane_id} within {wait_s}s", "TIMEOUT")
+
+
+def split_extra(args):
+    """(head, extra): everything after a bare -- goes to the agent; --model M before it is added."""
+    extra = []
+    if "--" in args:
+        i = args.index("--")
+        extra = args[i + 1 :]
+        args = args[:i]
+    args, model = take_flag(args, "--model", True)
+    if model:
+        extra = ["--model", model, *extra]
+    return args, extra
+
+
 def start_on_pane(name, kind, pane_id, retries=10, delay_ms=500, timeout=None, extra=None):
+    if kind in PANE_SEND_KINDS:
+        return start_rpi_on_pane(name, pane_id, extra=extra)
     argv = ["agent", "start", name, "--kind", kind, "--pane", pane_id]
     if timeout:
         argv.extend(["--timeout", str(timeout)])
@@ -323,11 +356,7 @@ def cmd_spawn(args):
     args, cwd = take_flag(args, "--cwd", True)
     args, label = take_flag(args, "--label", True)
     args, index = take_flag(args, "--index", True)
-    extra = []
-    if "--" in args:
-        i = args.index("--")
-        extra = args[i + 1 :]
-        args = args[:i]
+    args, extra = split_extra(args)
     if not args:
         raise HerdrError("spawn needs a name", "USAGE")
     if not workspace:
@@ -360,11 +389,7 @@ def cmd_spawn(args):
 def cmd_start(args):
     args, kind = take_flag(args, "--kind", True)
     args, tab_id = take_flag(args, "--tab", True)
-    extra = []
-    if "--" in args:
-        i = args.index("--")
-        extra = args[i + 1 :]
-        args = args[:i]
+    args, extra = split_extra(args)
     if not args:
         raise HerdrError("start needs a name", "USAGE")
     if not tab_id:
