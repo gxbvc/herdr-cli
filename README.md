@@ -19,4 +19,6 @@ herdr-cli spawn research --workspace admin --cwd ~/projects/admin
 cat task.md | herdr-cli send w7:t37 --wait
 ```
 
+rpi tabs: herdr 0.9.1 cannot `agent prompt` an rpi tab, so `send` types the text into its pane (`herdr pane send-text`) and presses Enter, each step with a 3 s timeout, and returns ok JSON with `via: pane-send-text`. `--wait`/`--until` are refused for rpi. A message sent while the rpi tab is busy is queued by rpi.
+
 See `AGENTS.md` for the agent-facing cheatsheet.
