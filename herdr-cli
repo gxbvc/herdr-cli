@@ -711,11 +711,29 @@ COMMANDS = {
 }
 
 
+# Test stop (Nov 10, after a test run made real to-dos #5507 to #5514; same rule as todos-cli). When
+# GXB_TEST_NO_REAL_IO has any non-empty value, only these read commands may run. Every other command,
+# including any command added later, exits 3 before herdr is called.
+TEST_STOP_ENV = "GXB_TEST_NO_REAL_IO"
+TEST_STOP_READS = frozenset({"workspaces", "tabs", "list", "read", "wait", "status"})
+
+
+def test_stop_refuses(argv, env=None):
+    env = os.environ if env is None else env
+    return bool(env.get(TEST_STOP_ENV, "")) and bool(argv) and argv[0] not in TEST_STOP_READS
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if not argv or argv[0] in ("-h", "--help", "help"):
         sys.stdout.write(USAGE)
         return 0
+    if test_stop_refuses(argv):
+        message = (f'TEST STOP: {TEST_STOP_ENV} is set, so herdr-cli refuses "{argv[0]}" '
+                   "(only read commands may run in tests). Nothing was sent.")
+        sys.stderr.write(message + "\n")
+        emit_err(message, "TEST_NO_REAL_IO")
+        return 3
     handler = COMMANDS.get(argv[0])
     if handler is None:
         return emit_err(f"unknown command: {argv[0]}", "USAGE")
