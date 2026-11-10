@@ -715,7 +715,8 @@ COMMANDS = {
 # GXB_TEST_NO_REAL_IO has any non-empty value, only these read commands may run. Every other command,
 # including any command added later, exits 3 before herdr is called.
 TEST_STOP_ENV = "GXB_TEST_NO_REAL_IO"
-TEST_STOP_READS = frozenset({"workspaces", "tabs", "list", "read", "wait", "status"})
+# read and wait are not allowed: they return live pane text, which can hold client data or secrets (Security, Nov 10).
+TEST_STOP_READS = frozenset({"workspaces", "tabs", "list", "status"})
 
 
 def test_stop_refuses(argv, env=None):

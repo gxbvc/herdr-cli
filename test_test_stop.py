@@ -20,7 +20,7 @@ SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
 MOD = importlib.util.module_from_spec(SPEC)
 LOADER.exec_module(MOD)
 
-READS = {"workspaces", "tabs", "list", "read", "wait", "status"}
+READS = {"workspaces", "tabs", "list", "status"}
 ON = {"GXB_TEST_NO_REAL_IO": "1"}
 
 
