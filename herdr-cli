@@ -29,7 +29,7 @@ Usage:
   herdr-cli workspaces
   herdr-cli tabs [--workspace ID|label]
   herdr-cli spawn <name> --workspace ID|label [--kind KIND] [--model M] [--cwd PATH] [--label TEXT] [--index N]
-  herdr-cli start <name> --tab TAB_ID [--kind KIND] [--model M]   (kind rpi: runs ~/.local/bin/rpi in the pane, then names it)
+  herdr-cli start <name> --tab TAB_ID [--kind KIND] [--model M]   (kind rpi: runs the guarded rpi launcher ~/.local/libexec/rpi-guard/rpi-guarded in the pane, then names it)
   herdr-cli send <tab|name> [--no-prefix] [--file PATH] [--wait] [--timeout MS] [--until STATUS] [text...]
   herdr-cli read <tab|name> [--lines N] [--source SOURCE]
   herdr-cli wait <tab|name> [--until STATUS] [--timeout MS]
@@ -269,7 +269,9 @@ def strip_star(label):
     return re.sub(rf"^{STAR}\s*", "", label or "")
 
 
-RPI_BIN = os.path.expanduser(os.environ.get("HERDR_CLI_RPI", "~/.local/bin/rpi"))
+# Nov 13 (Security rules a+b, rpi move): --kind rpi starts the GUARDED launcher (pinned patched rpi + secret guard
+# plugin, pin-checked before every start), never the stock ~/.local/bin/rpi, which self-updates and has no guard.
+RPI_BIN = os.path.expanduser(os.environ.get("HERDR_CLI_RPI", "~/.local/libexec/rpi-guard/rpi-guarded"))
 RPI_SESSIONS = os.path.expanduser(os.environ.get("HERDR_CLI_RPI_SESSIONS", "~/.rpi/agent/sessions"))
 
 

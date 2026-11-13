@@ -175,7 +175,8 @@ class RpiStartTest(unittest.TestCase):
             out = MOD.cmd_start(["lane1", "--tab", "w7:tY4", "--kind", "rpi", "--model", "cliproxy-fireworks/glm-5p3-flash"])
         run = [c for c in calls if c[:2] == ["pane", "run"]][0]
         self.assertEqual(run[2], "w7:pY4")
-        self.assertIn("rpi --model cliproxy-fireworks/glm-5p3-flash --session-dir ", run[3])
+        self.assertIn("rpi-guard/rpi-guarded --model cliproxy-fireworks/glm-5p3-flash --session-dir ", run[3])
+        self.assertNotIn(".local/bin/rpi", run[3])  # never the stock, self-updating rpi (Nov 13)
         self.assertIn(["agent", "rename", "w7:pY4", "lane1"], calls)
         self.assertNotIn("start", [c[1] for c in calls if c[0] == "agent"])
         self.assertEqual(out["kind"], "rpi")
