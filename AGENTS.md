@@ -2,32 +2,36 @@
 
 Talk to herdr in workspaces and tabs. Do not pass pane ids. Do not patch herdr. Formerly `agents-cli` (that name still works as a symlink).
 
+This repo is public. No client names, family details, phone numbers, ~/projects/hq paths, workspace ids or server IPs. Before any push: check the repo's visibility and run 'git log origin/main..'.
+
+Journal: after a send, herdr-cli calls a journal module if one is set: `HERDR_CLI_JOURNAL=/path/to/module.py`, or that path on one line in `~/.config/herdr-cli/journal`. Neither set: no journal. Examples below use placeholder ids (`w0:t37`).
+
 ## Commands
 
 ```bash
 herdr-cli workspaces
 herdr-cli tabs --workspace admin
 herdr-cli spawn research --workspace admin --cwd ~/projects/admin [--index 1]
-herdr-cli start research --tab w7:t37 --kind pi
-cat task.md | herdr-cli send w7:t37 --wait
+herdr-cli start research --tab w0:t37 --kind pi
+cat task.md | herdr-cli send w0:t37 --wait
 # From inside a herdr tab, send and ask start the text with "[<workspace> <tab id> <label>] "
-# (for example "[gov wH:tE Manager] "), so the reader knows the sender. Slash commands
+# (for example "[gov w0:tE Manager] "), so the reader knows the sender. Slash commands
 # like /new get no prefix; --no-prefix turns it off.
 herdr-cli ask research --file task.md --timeout 60000
-herdr-cli read w7:t37
-herdr-cli wait w7:t37
+herdr-cli read w0:t37
+herdr-cli wait w0:t37
 
-herdr-cli star w7:t37 [more...]            # adds the star emoji prefix to the label
-herdr-cli unstar w7:t37                    # removes it
-herdr-cli unstar --all [--workspace bailey]
-herdr-cli rename w7:t37 "New label"        # keeps nothing; pass the star yourself if wanted
-herdr-cli move w7:t37 --index 0            # 0 = leftmost tab in its workspace
+herdr-cli star w0:t37 [more...]            # adds the star emoji prefix to the label
+herdr-cli unstar w0:t37                    # removes it
+herdr-cli unstar --all [--workspace acme]
+herdr-cli rename w0:t37 "New label"        # keeps nothing; pass the star yourself if wanted
+herdr-cli move w0:t37 --index 0            # 0 = leftmost tab in its workspace
 herdr-cli move-workspace hq --index 0      # 0 = first workspace
 
-herdr-cli status [--workspace bailey] [--stale-hours 24] [--questions] [--pretty]
+herdr-cli status [--workspace acme] [--stale-hours 24] [--questions] [--pretty]
 ```
 
-Target is a **tab id** (`w7:t37`) or an agent **name**. `--kind` defaults to `pi`. `spawn` creates a tab (`--no-focus`) then starts the agent; `--index` moves it after start.
+Target is a **tab id** (`w0:t37`) or an agent **name**. `--kind` defaults to `pi`. `spawn` creates a tab (`--no-focus`) then starts the agent; `--index` moves it after start.
 
 JSON: `{"ok":true,"data":...}` or `{"ok":false,"error":"...","code":"..."}`. `status --pretty` prints a table instead.
 

@@ -430,26 +430,67 @@ def cmd_start(args):
     return emit_ok({"tab_id": tab_id, "name": name, "kind": kind or "pi"})
 
 
+def sender_id():
+    """Journal id of the sender: 'tmux:SESSION' inside tmux (the header rule, Security Nov 16), else the tab."""
+    if os.environ.get("TMUX"):
+        return "tmux:" + tmux_session_name()
+    return os.environ.get("HERDR_TAB_ID", "external")
+
+
+def journal_module_path():
+    """The journal module to call after a send, or None (no journal). Set by HERDR_CLI_JOURNAL, else by the
+    one-line file ~/.config/herdr-cli/journal (a path; ~ allowed). Neither set: no journal."""
+    from pathlib import Path
+    value = os.environ.get("HERDR_CLI_JOURNAL", "").strip()
+    if not value:
+        try:
+            value = (Path.home() / ".config/herdr-cli/journal").read_text().strip()
+        except OSError:
+            return None
+    return Path(os.path.expanduser(value)) if value else None
+
+
 def journal_send(target):
-    """Best effort; never read or pass prompt text into the HQ journal."""
+    """Best effort; never read or pass prompt text into the journal."""
     try:
         import importlib.util
-        from pathlib import Path
-        path = Path.home() / "projects/hq/bin/live_journal.py"
+        path = journal_module_path()
+        if path is None:
+            return
         spec = importlib.util.spec_from_file_location("gxb_live_journal", path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        module.try_append({"type": "message", "fromId": os.environ.get("HERDR_TAB_ID", "external"),
-                           "toId": resolve_tab_id(target)})
+        module.try_append({"type": "message", "fromId": sender_id(), "toId": resolve_tab_id(target)})
     except Exception:
         pass
 
 
+def tmux_session_name():
+    """The tmux session this process runs in, or 'unknown'."""
+    try:
+        argv = ["tmux", "display-message", "-p"]
+        if os.environ.get("TMUX_PANE"):
+            argv += ["-t", os.environ["TMUX_PANE"]]
+        name = subprocess.run(argv + ["#S"], capture_output=True, text=True, timeout=5).stdout.strip()
+        return name or "unknown"
+    except Exception:
+        return "unknown"
+
+
 def sender_prefix(text):
-    """'[gov wH:tE Manager] ' for a send from inside a herdr tab (Christian, 2026-10-19), so the
-    reader always knows the workspace name, tab id and tab label of the sender."""
+    """'[gov w0:tE Manager] ' for a send from inside a herdr tab (Christian, 2026-10-19), so the
+    reader always knows the workspace name, tab id and tab label of the sender.
+
+    Inside tmux (TMUX set) the HERDR_* variables are not this process's own: tmux sessions inherit the tmux
+    server's global environment, which held the tab of whoever started the server (Security, Nov 16: every
+    watcher sent as '[acme w0:t5H Acme manager]'). There the header is '[tmux SESSION] ' instead."""
+    if text.lstrip().startswith("/"):  # a slash command like /new must stay first
+        return ""
+    if os.environ.get("TMUX"):
+        prefix = "[tmux " + tmux_session_name() + "] "
+        return "" if text.lstrip().startswith(prefix.strip()) else prefix
     tab_id = os.environ.get("HERDR_TAB_ID")
-    if not tab_id or text.lstrip().startswith("/"):  # a slash command like /new must stay first
+    if not tab_id:
         return ""
     workspace_id = os.environ.get("HERDR_WORKSPACE_ID") or tab_id.split(":", 1)[0]
     try:
